@@ -11,6 +11,7 @@ JNINativeMethod methods[] = {
 ```
 ##### 1.1 su文件检测
 - 检测方式
+
     ```c++
     static int scan_path() {
         char *path = getenv("PATH");
@@ -33,6 +34,7 @@ JNINativeMethod methods[] = {
     selene:/ $
     ```
 - 思路
+
     之所以要检测这些可执行文件的目录是否存在su文件是因为正常情况下，root过的手机都会依照传统方式通过执行su命令来提权切换到root用户下，那这就依靠在这些可执行文件的目录下放置su文件。对于Magisk来说，同样也是在每次启动后去动态修改bin目录，先是将magisk、magiskinit放入自身文件下的bin目录，再将例如su、magiskhide等做magisk的软链，最后通过bind mount同步到真实的bin目录下达到修改bin的效果
     ```c++
     // native/jni/core/module.cpp
@@ -90,6 +92,7 @@ JNINativeMethod methods[] = {
     ```
 ##### 1.2 Magisk模块篡改系统文件检测
 - 检测方式
+
     ```c++
     static jint haveMagicMount(JNIEnv *env __unused, jclass clazz __unused) {
         dev_t data_dev = scan_mountinfo();
@@ -161,6 +164,7 @@ JNINativeMethod methods[] = {
     }
     ```
 - 思路
+
     我理解是在Android系统中，类似system、vendor、product这些都属于系统相关的镜像，它们挂载到设备上时分区通常是只读的，而相对而言，data分区是可读写的，因此某些magisk模块会通过挂载的方式将例如system挂载到/data/system下面，从而完成对system分区的修改。
     >
     这样做的检测原理是例如当访问/system/build.prop时，实际上却是访问/data/system/build.prop，在上面的检测逻辑中是先获取挂载信息中/data目录相关的挂载设备号，例如
@@ -196,6 +200,7 @@ JNINativeMethod methods[] = {
     上述检测异常结果并没有在Android11上复现，待后续分析原因
 ##### 1.3 Magisk Hide开启检测
 - 检测方式
+
     ```c++
     static int scan_status() {
         if (getppid() == 1) return -1;
@@ -226,6 +231,7 @@ JNINativeMethod methods[] = {
     ```
 
 - 思路
+
     检测逻辑比较简单，比较maps中的TracerPid是否为0，更有意思的是它的检测时机，首先看看AndroidManifest.xml
     ```shell
     # app/src/main/AndroidManifest.xml

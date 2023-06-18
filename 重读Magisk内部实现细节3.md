@@ -350,8 +350,8 @@ sigaction(SIGALRM, &act, nullptr);
 setup_inotify();
 
 static void setup_inotify() {
-    // 创建 inotify 实例时指定了 IN_CLOEXEC 标志位，表示将 inotify 实例设置为 close-on-exec 模式。
-    // 在 close-on-exec 模式下，当进程调用 exec 函数时，inotify 实例会自动关闭
+    // 创建inotify实例时指定了IN_CLOEXEC标志位，表示将inotify实例设置为 close-on-exec 模式。
+    // 在close-on-exec模式下，当进程调用exec函数时，inotify实例会自动关闭
     inotify_fd = xinotify_init1(IN_CLOEXEC);
     if (inotify_fd < 0)
         return;
@@ -380,7 +380,9 @@ static void setup_inotify() {
     }
 }
 ```
-
+这个部分主要做的事是
+- 设置信号处理函数，信号分别是SIGTERMTHRD、SIGIO、SIGALRM
+- 启动inotify，fd写入inotify_fd，监控/system/bin/app_process的access事件，重点在于packages.xml文件的写入
 #### 2 ptrace Zygote
 ```c
 check_zygote();
@@ -458,6 +460,7 @@ static void new_zygote(int pid) {
     xptrace(PTRACE_CONT, pid);
 }
 ```
+这一部分的作用是轮询判断zygote进程是否启动以及ptrace attach到zygote以便于监控到zygote的fork操作（引导启动App进程）
 #### 3 子进程信号处理
 ```c
 for (int status;;) {
@@ -488,15 +491,16 @@ for (int status;;) {
 
     if (signal == SIGTRAP && event) {
         unsigned long msg;
-        // 获取进程消息
         xptrace(PTRACE_GETEVENTMSG, pid, nullptr, &msg);
+        // 处理zygote消息
         if (zygote_map.count(pid)) {
             // Zygote event
             switch (event) {
                 case PTRACE_EVENT_FORK:
                 case PTRACE_EVENT_VFORK:
                     PTRACE_LOG("zygote forked: [%lu]\n", msg);
-                    // 表示收到的是zygote事件，监控到zygote fork子进程
+                    // 表示收到的是zygote消息，监控到zygote fork子进程
+                    // 此时设置attaches map中app pid的值为true
                     attaches[msg] = true;
                     break;
                 case PTRACE_EVENT_EXIT:
@@ -507,8 +511,9 @@ for (int status;;) {
                     DETACH_AND_CONT;
             }
         } else {
+            // 处理用户App消息
             switch (event) {
-                // 表示收到的是子进程的信号
+                // 表示收到的是子进程的信号，有新的App启动，开始执行隐藏操作
                 case PTRACE_EVENT_CLONE:
                     PTRACE_LOG("create new threads: [%lu]\n", msg);
                     if (attaches[pid] && check_pid(pid))
@@ -666,3 +671,4 @@ void hide_unmount(int pid) {
 }
 
 ```
+核心步骤，上一步已经ptrace attach到zygote，当监听到App启动了，切换到目标进程的namespace并执行umount操作

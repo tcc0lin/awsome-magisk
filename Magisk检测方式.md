@@ -268,3 +268,201 @@ JNINativeMethod methods[] = {
     root           7322   6346 3 11:38:35 pts/27 00:00:00 grep vvb
     ```
     启动了名为io.github.vvb2060.magiskdetector_zygote的AppZygote进程，而就是通过这个检测来判断TracerPid
+    >
+    从源码角度来看看AppZygote进程和App进程启动方式的区别，直接从AMS看起
+    ```java
+    // frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java
+    @GuardedBy("this")
+    final ProcessRecord startProcessLocked(String processName,
+            ApplicationInfo info, boolean knownToBeDead, int intentFlags,
+            HostingRecord hostingRecord, int zygotePolicyFlags, boolean allowWhileBooting,
+            boolean isolated) {
+        return mProcessList.startProcessLocked(processName, info, knownToBeDead, intentFlags,
+                hostingRecord, zygotePolicyFlags, allowWhileBooting, isolated, 0 /* isolatedUid */,
+                false /* isSdkSandbox */, 0 /* sdkSandboxClientAppUid */,
+                null /* sdkSandboxClientAppPackage */,
+                null /* ABI override */, null /* entryPoint */,
+                null /* entryPointArgs */, null /* crashHandler */);
+    }
+
+    // frameworks/base/services/core/java/com/android/server/am/ProcessList.java
+    @GuardedBy("mService")
+    boolean startProcessLocked(HostingRecord hostingRecord, String entryPoint, ProcessRecord app,
+            int uid, int[] gids, int runtimeFlags, int zygotePolicyFlags, int mountExternal,
+            String seInfo, String requiredAbi, String instructionSet, String invokeWith,
+            long startUptime, long startElapsedTime) {
+        app.setPendingStart(true);
+        app.setRemoved(false);
+        
+        ......
+
+        if (mService.mConstants.FLAG_PROCESS_START_ASYNC) {
+            if (DEBUG_PROCESSES) Slog.i(TAG_PROCESSES,
+                    "Posting procStart msg for " + app.toShortString());
+            mService.mProcStartHandler.post(() -> handleProcessStart(
+                    app, entryPoint, gids, runtimeFlags, zygotePolicyFlags, mountExternal,
+                    requiredAbi, instructionSet, invokeWith, startSeq));
+            return true;
+        } else {
+            try {
+                // 调用startProcess
+                final Process.ProcessStartResult startResult = startProcess(hostingRecord,
+                        entryPoint, app,
+                        uid, gids, runtimeFlags, zygotePolicyFlags, mountExternal, seInfo,
+                        requiredAbi, instructionSet, invokeWith, startUptime);
+                handleProcessStartedLocked(app, startResult.pid, startResult.usingWrapper,
+                        startSeq, false);
+            } catch (RuntimeException e) {
+                Slog.e(ActivityManagerService.TAG, "Failure starting process "
+                        + app.processName, e);
+                app.setPendingStart(false);
+                mService.forceStopPackageLocked(app.info.packageName, UserHandle.getAppId(app.uid),
+                        false, false, true, false, false, app.userId, "start failure");
+            }
+            return app.getPid() > 0;
+        }
+    }
+
+    private Process.ProcessStartResult startProcess(HostingRecord hostingRecord, String entryPoint,
+            ProcessRecord app, int uid, int[] gids, int runtimeFlags, int zygotePolicyFlags,
+            int mountExternal, String seInfo, String requiredAbi, String instructionSet,
+            String invokeWith, long startTime) {
+        try {
+            
+            ......
+
+            final Process.ProcessStartResult startResult;
+            boolean regularZygote = false;
+            if (hostingRecord.usesWebviewZygote()) {
+                startResult = startWebView(entryPoint,
+                        app.processName, uid, uid, gids, runtimeFlags, mountExternal,
+                        app.info.targetSdkVersion, seInfo, requiredAbi, instructionSet,
+                        app.info.dataDir, null, app.info.packageName,
+                        app.getDisabledCompatChanges(),
+                        new String[]{PROC_START_SEQ_IDENT + app.getStartSeq()});
+            } else if (hostingRecord.usesAppZygote()) {
+                final AppZygote appZygote = createAppZygoteForProcessIfNeeded(app);
+
+                // We can't isolate app data and storage data as parent zygote already did that.
+                startResult = appZygote.getProcess().start(entryPoint,
+                        app.processName, uid, uid, gids, runtimeFlags, mountExternal,
+                        app.info.targetSdkVersion, seInfo, requiredAbi, instructionSet,
+                        app.info.dataDir, null, app.info.packageName,
+                        /*zygotePolicyFlags=*/ ZYGOTE_POLICY_FLAG_EMPTY, isTopApp,
+                        app.getDisabledCompatChanges(), pkgDataInfoMap, allowlistedAppDataInfoMap,
+                        false, false,
+                        new String[]{PROC_START_SEQ_IDENT + app.getStartSeq()});
+            } else {
+                regularZygote = true;
+                startResult = Process.start(entryPoint,
+                        app.processName, uid, uid, gids, runtimeFlags, mountExternal,
+                        app.info.targetSdkVersion, seInfo, requiredAbi, instructionSet,
+                        app.info.dataDir, invokeWith, app.info.packageName, zygotePolicyFlags,
+                        isTopApp, app.getDisabledCompatChanges(), pkgDataInfoMap,
+                        allowlistedAppDataInfoMap, bindMountAppsData, bindMountAppStorageDirs,
+                        new String[]{PROC_START_SEQ_IDENT + app.getStartSeq()});
+            }
+            return startResult;
+        } finally {
+            Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+        }
+    }
+    ```
+    只看关键点，根据传入的hostingRecord判断启动什么样的进程，如果是AppZygote进程，则
+    ```java
+    // frameworks/base/services/core/java/com/android/server/am/ProcessList.java
+    private AppZygote createAppZygoteForProcessIfNeeded(final ProcessRecord app) {
+        synchronized (mService) {
+            // The UID for the app zygote should be the UID of the application hosting
+            // the service.
+            final int uid = app.hostingRecord.getDefiningUid();
+            AppZygote appZygote = mAppZygotes.get(app.info.processName, uid);
+            final ArrayList<ProcessRecord> zygoteProcessList;
+            if (appZygote == null) {
+                if (DEBUG_PROCESSES) {
+                    Slog.d(TAG_PROCESSES, "Creating new app zygote.");
+                }
+                final IsolatedUidRange uidRange =
+                        mAppIsolatedUidRangeAllocator.getIsolatedUidRangeLocked(
+                                app.info.processName, app.hostingRecord.getDefiningUid());
+                final int userId = UserHandle.getUserId(uid);
+                // Create the app-zygote and provide it with the UID-range it's allowed
+                // to setresuid/setresgid to.
+                final int firstUid = UserHandle.getUid(userId, uidRange.mFirstUid);
+                final int lastUid = UserHandle.getUid(userId, uidRange.mLastUid);
+                ApplicationInfo appInfo = new ApplicationInfo(app.info);
+                // If this was an external service, the package name and uid in the passed in
+                // ApplicationInfo have been changed to match those of the calling package;
+                // that is not what we want for the AppZygote though, which needs to have the
+                // packageName and uid of the defining application. This is because the
+                // preloading only makes sense in the context of the defining application,
+                // not the calling one.
+                appInfo.packageName = app.hostingRecord.getDefiningPackageName();
+                appInfo.uid = uid;
+                appZygote = new AppZygote(appInfo, uid, firstUid, lastUid);
+                mAppZygotes.put(app.info.processName, uid, appZygote);
+                zygoteProcessList = new ArrayList<ProcessRecord>();
+                mAppZygoteProcesses.put(appZygote, zygoteProcessList);
+            } else {
+                if (DEBUG_PROCESSES) {
+                    Slog.d(TAG_PROCESSES, "Reusing existing app zygote.");
+                }
+                mService.mHandler.removeMessages(KILL_APP_ZYGOTE_MSG, appZygote);
+                zygoteProcessList = mAppZygoteProcesses.get(appZygote);
+            }
+            // Note that we already add the app to mAppZygoteProcesses here;
+            // this is so that another thread can't come in and kill the zygote
+            // before we've even tried to start the process. If the process launch
+            // goes wrong, we'll clean this up in removeProcessNameLocked()
+            zygoteProcessList.add(app);
+
+            return appZygote;
+        }
+    }
+    ```
+    主要是创建了AppZygote的对象，接着会调用getProcess方法，而getProcess中就创建了AppZygote的进程
+    ```java
+    // frameworks/base/core/java/android/os/AppZygote.java
+    public ChildZygoteProcess getProcess() {
+        synchronized (mLock) {
+            if (mZygote != null) return mZygote;
+
+            connectToZygoteIfNeededLocked();
+            return mZygote;
+        }
+    }
+
+    @GuardedBy("mLock")
+    private void connectToZygoteIfNeededLocked() {
+        String abi = mAppInfo.primaryCpuAbi != null ? mAppInfo.primaryCpuAbi :
+                Build.SUPPORTED_ABIS[0];
+        try {
+            int runtimeFlags = Zygote.getMemorySafetyRuntimeFlagsForSecondaryZygote(
+                    mAppInfo, mProcessInfo);
+            // 创建了ChildZygote进程，可以认为这个就是AppZygote进程
+            mZygote = Process.ZYGOTE_PROCESS.startChildZygote(
+                    "com.android.internal.os.AppZygoteInit",
+                    mAppInfo.processName + "_zygote",
+                    mZygoteUid,
+                    mZygoteUid,
+                    null,  // gids
+                    runtimeFlags,
+                    "app_zygote",  // seInfo
+                    abi,  // abi
+                    abi, // acceptedAbiList
+                    VMRuntime.getInstructionSet(abi), // instructionSet
+                    mZygoteUidGidMin,
+                    mZygoteUidGidMax);
+
+            ZygoteProcess.waitForConnectionToZygote(mZygote.getPrimarySocketAddress());
+            // preload application code in the zygote
+            Log.i(LOG_TAG, "Starting application preload.");
+            mZygote.preloadApp(mAppInfo, abi);
+            Log.i(LOG_TAG, "Application preload done.");
+        } catch (Exception e) {
+            Log.e(LOG_TAG, "Error connecting to app zygote", e);
+            stopZygoteLocked();
+        }
+    }
+    ```
+    创建了ChildZygote进程，可以认为这个就是AppZygote进程，这个进程就没有创建binder线程，使用socket通信

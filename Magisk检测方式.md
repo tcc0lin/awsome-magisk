@@ -608,3 +608,7 @@ JNINativeMethod methods[] = {
         proc->startThreadPool();
     }
     ```
+
+
+#### 2 DetectMagiskHide
+来源于开源项目[DetectMagiskHide](https://github.com/darvincisec/DetectMagiskHide)（现已停止维护），作者也通过一篇[文章](https://darvincitech.wordpress.com/2019/11/04/detecting-magisk-hide/)来阐述他的想法

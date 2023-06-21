@@ -196,7 +196,7 @@ JNINativeMethod methods[] = {
     7cd47ea000-7cd47eb000 rw-p 00014000 fd:01 3517                           /system/lib64/vendor.mediatek.hardware.mms@1.2.so
     ```
     取出像01:3517、02:2541设备号来检测一致性
-    >
+    
     上述检测异常结果并没有在Android11上复现，待后续分析原因
 ##### 1.3 Magisk Hide开启检测
 - 检测方式
@@ -254,7 +254,7 @@ JNINativeMethod methods[] = {
     </application>
     ```
     首先是引用了zygotePreloadName这个属性，它是在Android 4.1后引入的，App可以通过该属性指定在Zygote启动时需要加载自定义的so并缓存到Zygote进程中。然后是isolatedProcess以及useAppZygote这两个属性，isolatedProcess是表示让service独立运行在进程中，而useAppZygote则从名字上能直接看出来，表明是否需要使用AppZygote模式
-    >
+    
     有了上面这些属性的开启，就能确保检测进程以AppZygote模式启动，并且也在Zygote启动时加载检测so文件，之所以要以AppZygote的模式启动，也是因为为了要规避Magisk Hide的影响，可以从文档中以下两个方面的解释来看
     - >Magisk Hide的实现核心是ptrace：magiskd跟踪zygote进程，监控fork和clone操作，即关注子进程创建及其线程创建。 被触发后读取/proc/pid/cmdline和uid判断是否为目标进程。 一般应用进程的cmdline在Java设置，此时已有主线程及JVM虚拟机工作线程。 在加载用户代码前，会至少有一次binder调用，使binder线程启动，此操作触发magiskhide卸载挂载
     - > 唯一的例外是app zygote，它和zygote一样通过socket通信，没有binder线程。在设置cmdline和加载用户代码之间没有线程启动， 因此，可以检测是否被ptrace来判断magiskhide的存在，即使不在隐藏列表中，只要开启功能，就会被发现
@@ -268,7 +268,7 @@ JNINativeMethod methods[] = {
     root           7322   6346 3 11:38:35 pts/27 00:00:00 grep vvb
     ```
     启动了名为io.github.vvb2060.magiskdetector_zygote的AppZygote进程，而就是通过这个检测来判断TracerPid
-    >
+    
     从源码角度来看看AppZygote进程和App进程启动方式的区别，直接从AMS看起
     ```java
     // frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java
@@ -465,4 +465,146 @@ JNINativeMethod methods[] = {
         }
     }
     ```
-    创建了ChildZygote进程，可以认为这个就是AppZygote进程，这个进程就没有创建binder线程，使用socket通信
+    可以看到是通过ZYGOTE_PROCESS的startChildZygote来启动的进程，而正常的App则是这么启动的
+    ```java
+    // core/java/android/os/Process.java
+    public static ProcessStartResult start(@NonNull final String processClass,
+                                           @Nullable final String niceName,
+                                           int uid, int gid, @Nullable int[] gids,
+                                           int runtimeFlags,
+                                           int mountExternal,
+                                           int targetSdkVersion,
+                                           @Nullable String seInfo,
+                                           @NonNull String abi,
+                                           @Nullable String instructionSet,
+                                           @Nullable String appDataDir,
+                                           @Nullable String invokeWith,
+                                           @Nullable String packageName,
+                                           int zygotePolicyFlags,
+                                           boolean isTopApp,
+                                           @Nullable long[] disabledCompatChanges,
+                                           @Nullable Map<String, Pair<String, Long>>
+                                                   pkgDataInfoMap,
+                                           @Nullable Map<String, Pair<String, Long>>
+                                                   whitelistedDataInfoMap,
+                                           boolean bindMountAppsData,
+                                           boolean bindMountAppStorageDirs,
+                                           @Nullable String[] zygoteArgs) {
+        return ZYGOTE_PROCESS.start(processClass, niceName, uid, gid, gids,
+                    runtimeFlags, mountExternal, targetSdkVersion, seInfo,
+                    abi, instructionSet, appDataDir, invokeWith, packageName,
+                    zygotePolicyFlags, isTopApp, disabledCompatChanges,
+                    pkgDataInfoMap, whitelistedDataInfoMap, bindMountAppsData,
+                    bindMountAppStorageDirs, zygoteArgs);
+    }
+
+    //core/java/android/os/ZygoteProcess.java
+    public final Process.ProcessStartResult start(@NonNull final String processClass,
+                                                  final String niceName,
+                                                  int uid, int gid, @Nullable int[] gids,
+                                                  int runtimeFlags, int mountExternal,
+                                                  int targetSdkVersion,
+                                                  @Nullable String seInfo,
+                                                  @NonNull String abi,
+                                                  @Nullable String instructionSet,
+                                                  @Nullable String appDataDir,
+                                                  @Nullable String invokeWith,
+                                                  @Nullable String packageName,
+                                                  int zygotePolicyFlags,
+                                                  boolean isTopApp,
+                                                  @Nullable long[] disabledCompatChanges,
+                                                  @Nullable Map<String, Pair<String, Long>>
+                                                          pkgDataInfoMap,
+                                                  @Nullable Map<String, Pair<String, Long>>
+                                                          whitelistedDataInfoMap,
+                                                  boolean bindMountAppsData,
+                                                  boolean bindMountAppStorageDirs,
+                                                  @Nullable String[] zygoteArgs) {
+        // TODO (chriswailes): Is there a better place to check this value?
+        if (fetchUsapPoolEnabledPropWithMinInterval()) {
+            informZygotesOfUsapPoolStatus();
+        }
+
+        try {
+            return startViaZygote(processClass, niceName, uid, gid, gids,
+                    runtimeFlags, mountExternal, targetSdkVersion, seInfo,
+                    abi, instructionSet, appDataDir, invokeWith, /*startChildZygote=*/ false,
+                    packageName, zygotePolicyFlags, isTopApp, disabledCompatChanges,
+                    pkgDataInfoMap, whitelistedDataInfoMap, bindMountAppsData,
+                    bindMountAppStorageDirs, zygoteArgs);
+        } catch (ZygoteStartFailedEx ex) {
+            Log.e(LOG_TAG,
+                    "Starting VM process through Zygote failed");
+            throw new RuntimeException(
+                    "Starting VM process through Zygote failed", ex);
+        }
+    }
+    ```
+    差异在于startViaZygote与startChildZygote的不同，而startChildZygote的关键在于
+    ```java
+    // core/java/android/os/ZygoteProcess.java
+    if (startChildZygote) {
+        argsForZygote.add("--start-child-zygote");
+    }
+    ```
+    启动参数的不同，在Zygote处理命令时的不同
+    ```java
+    // core/java/com/android/internal/os/ZygoteInit.java
+    /**
+     * The main function called when started through the zygote process. This could be unified with
+     * main(), if the native code in nativeFinishInit() were rationalized with Zygote startup.<p>
+     *
+     * Current recognized args:
+     * <ul>
+     * <li> <code> [--] &lt;start class name&gt;  &lt;args&gt;
+     * </ul>
+     *
+     * @param targetSdkVersion target SDK version
+     * @param disabledCompatChanges set of disabled compat changes for the process (all others
+     *                              are enabled)
+     * @param argv             arg strings
+     */
+    public static final Runnable zygoteInit(int targetSdkVersion, long[] disabledCompatChanges,
+            String[] argv, ClassLoader classLoader) {
+        if (RuntimeInit.DEBUG) {
+            Slog.d(RuntimeInit.TAG, "RuntimeInit: Starting application from zygote");
+        }
+
+        Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "ZygoteInit");
+        RuntimeInit.redirectLogStreams();
+
+        RuntimeInit.commonInit();
+        // 启动binder线程池
+        ZygoteInit.nativeZygoteInit();
+        return RuntimeInit.applicationInit(targetSdkVersion, disabledCompatChanges, argv,
+                classLoader);
+    }
+
+    /**
+     * The main function called when starting a child zygote process. This is used as an alternative
+     * to zygoteInit(), which skips calling into initialization routines that start the Binder
+     * threadpool.
+     */
+    static final Runnable childZygoteInit(
+            int targetSdkVersion, String[] argv, ClassLoader classLoader) {
+        RuntimeInit.Arguments args = new RuntimeInit.Arguments(argv);
+        return RuntimeInit.findStaticMain(args.startClass, args.startArgs, classLoader);
+    }
+    ```
+    相比于zygoteInit，childZygoteInit跳过了zygoteInit的步骤（也就是初始化binder线程池的步骤）
+    ```c
+    // core/jni/AndroidRuntime.cpp
+    static void com_android_internal_os_ZygoteInit_nativeZygoteInit(JNIEnv* env, jobject clazz)
+    {
+        gCurRuntime->onZygoteInit();
+    }
+
+    // cmds/app_process/app_main.cpp
+    virtual void onZygoteInit()
+    {
+        sp<ProcessState> proc = ProcessState::self();
+        ALOGV("App process: starting thread pool.\n");
+        // binder线程池启动
+        proc->startThreadPool();
+    }
+    ```

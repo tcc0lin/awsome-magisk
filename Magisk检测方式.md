@@ -611,4 +611,128 @@ JNINativeMethod methods[] = {
 
 
 #### 2 DetectMagiskHide
-来源于开源项目[DetectMagiskHide](https://github.com/darvincisec/DetectMagiskHide)（现已停止维护），作者也通过一篇[文章](https://darvincitech.wordpress.com/2019/11/04/detecting-magisk-hide/)来阐述他的想法
+来源于开源项目[DetectMagiskHide](https://github.com/darvincisec/DetectMagiskHide)（现已停止维护），作者也通过一篇[文章](https://darvincitech.wordpress.com/2019/11/04/detecting-magisk-hide/)来阐述他的想法，想法和上一个项目类似，也是寻找到MagiskHide的漏洞，当service存在于一个独立的isolated process中时，MagiskHide无法改变其namespace，因此service就可以用常规的su/magisk检测手段来做检测了，具体看看代码
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    package="com.darvin.security">
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:zygotePreloadName=".AppZygotePreload"
+        android:theme="@style/AppTheme"
+        tools:targetApi="q">
+        <activity android:name=".DetectMagisk"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <service
+            android:name=".IsolatedService"
+            android:exported="false"
+            android:isolatedProcess="true"
+            android:useAppZygote="true" />
+    </application>
+
+</manifest>
+```
+从AndroidManifest.xml上也能看出，zygotePreloadName指定了预加载so的类，isolatedProcess和useAppZygote也指定了IsolatedService作为独立进程，检测的方式也是常用的检测手段
+
+##### 2.1 su文件检测
+```c
+static const char *suPaths[] = {
+        "/data/local/su",
+        "/data/local/bin/su",
+        "/data/local/xbin/su",
+        "/sbin/su",
+        "/su/bin/su",
+        "/system/bin/su",
+        "/system/bin/.ext/su",
+        "/system/bin/failsafe/su",
+        "/system/sd/xbin/su",
+        "/system/usr/we-need-root/su",
+        "/system/xbin/su",
+        "/cache/su",
+        "/data/su",
+        "/dev/su"
+};
+static inline bool is_supath_detected() {
+    int len = sizeof(suPaths) / sizeof(suPaths[0]);
+
+    bool bRet = false;
+    for (int i = 0; i < len; i++) {
+        __android_log_print(ANDROID_LOG_INFO, TAG, "Checking SU Path  :%s", suPaths[i]);
+        if (open(suPaths[i], O_RDONLY) >= 0) {
+            __android_log_print(ANDROID_LOG_INFO, TAG, "Found SU Path :%s", suPaths[i]);
+            bRet = true;
+            break;
+        }
+        if (0 == access(suPaths[i], R_OK)) {
+            __android_log_print(ANDROID_LOG_INFO, TAG, "Found SU Path :%s", suPaths[i]);
+            bRet = true;
+            break;
+        }
+    }
+
+    return bRet;
+}
+```
+##### 2.2 mount文件检测
+```c
+static char *blacklistedMountPaths[] = {
+        "magisk",
+        "core/mirror",
+        "core/img"
+};
+
+static inline bool is_mountpaths_detected() {
+    int len = sizeof(blacklistedMountPaths) / sizeof(blacklistedMountPaths[0]);
+
+    bool bRet = false;
+
+    FILE *fp = fopen("/proc/self/mounts", "r");
+    if (fp == NULL)
+        goto exit;
+
+    fseek(fp, 0L, SEEK_END);
+    long size = ftell(fp);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "Opening Mount file size: %ld", size);
+    /* For some reason size comes as zero */
+    if (size == 0)
+        size = 20000;  /*This will differ for different devices */
+    char *buffer = calloc(size, sizeof(char));
+    if (buffer == NULL)
+        goto exit;
+
+    size_t read = fread(buffer, 1, size, fp);
+    int count = 0;
+    for (int i = 0; i < len; i++) {
+        __android_log_print(ANDROID_LOG_INFO, TAG, "Checking Mount Path  :%s", blacklistedMountPaths[i]);
+        char *rem = strstr(buffer, blacklistedMountPaths[i]);
+        if (rem != NULL) {
+            count++;
+            __android_log_print(ANDROID_LOG_INFO, TAG, "Found Mount Path :%s", blacklistedMountPaths[i]);
+            break;
+        }
+    }
+    if (count > 0)
+        bRet = true;
+
+    exit:
+
+    if (buffer != NULL)
+        free(buffer);
+    if (fp != NULL)
+        fclose(fp);
+
+    return bRet;
+}
+```

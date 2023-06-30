@@ -736,3 +736,6 @@ static inline bool is_mountpaths_detected() {
     return bRet;
 }
 ```
+
+
+#### 3 MagiskKiller

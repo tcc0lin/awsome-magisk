@@ -737,5 +737,176 @@ static inline bool is_mountpaths_detected() {
 }
 ```
 
-
 #### 3 MagiskKiller
+来源于开源项目[MagiskKiller](https://github.com/canyie/MagiskKiller)（现已停止维护），作者在项目中也说明了适用于Magisk v23.0版本及以下，因此对于高版本的Magisk来说已经无法适用了
+
+检测方式都来源于MagiskKiller类的detect方法
+```java
+public static int detect(String apk) {
+    var detectTracerTask = detectTracer(apk);
+    // int类型的result用来存储结果数据
+    int result;
+    // 检测Properties
+    result = detectProperties();
+    // 检测/dev/pts
+    result |= detectMagiskPts();
+
+    int tracer;
+    try {
+        // 检测trace
+        tracer = detectTracerTask.call();
+    } catch (Exception e) {
+        throw new RuntimeException("wait trace checker", e);
+    }
+    if (tracer != 0) {
+        Log.e(TAG, "Found magiskd " + tracer);
+        result |= FOUND_TRACER;
+    }
+    return result;
+}
+```
+##### 3.1 detectProperties
+- 检测方式
+    ```java
+    // app/src/main/java/top/canyie/magiskkiller/MagiskKiller.java
+    public static int detectProperties() {
+        int result = 0;
+        try {
+            result = detectBootloaderProperties();
+            result |= detectDalvikConfigProperties();
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to check props", e);
+        }
+        return result;
+    }
+
+    private static int detectDalvikConfigProperties() {
+        int result = 0;
+        PropArea dalvikConfig = PropArea.any("dalvik_config_prop", "exported_dalvik_prop", "dalvik_prop");
+        if (dalvikConfig == null) return 0;
+        var values = dalvikConfig.findPossibleValues("ro.dalvik.vm.native.bridge");
+        if (values.size() > 1) {
+            result |= FOUND_RESETPROP;
+        }
+
+        for (String value : values) {
+            if ("libriruloader.so".equals(value)) {
+                result |= FOUND_RIRU;
+                break;
+            }
+        }
+        return result;
+    }
+
+    private static int detectBootloaderProperties() {
+        int result = 0;
+        // The better way to get the filename would be `getprop -Z`
+        // But "-Z" option requires Android 7.0+, and I'm lazy to implement it
+        PropArea bootloader = PropArea.any("bootloader_prop", "exported2_default_prop", "default_prop");
+        if (bootloader == null) return 0;
+        var values = bootloader.findPossibleValues("ro.boot.verifiedbootstate");
+        // ro properties are read-only, multiple values found = the property has been modified by resetprop
+        if (values.size() > 1) {
+            result |= FOUND_RESETPROP;
+        }
+        for (String value : values) {
+            if ("orange".equals(value)) {
+                result |= FOUND_BOOTLOADER_UNLOCKED;
+                result &= ~FOUND_BOOTLOADER_SELF_SIGNED;
+            } else if ("yellow".equals(value) && (result & FOUND_BOOTLOADER_UNLOCKED) == 0) {
+                result |= FOUND_BOOTLOADER_SELF_SIGNED;
+            }
+        }
+
+        values = bootloader.findPossibleValues("ro.boot.vbmeta.device_state");
+        if (values.size() > 1) {
+            result |= FOUND_RESETPROP;
+        }
+        for (String value : values) {
+            if ("unlocked".equals(value)) {
+                result |= FOUND_BOOTLOADER_UNLOCKED;
+                result &= ~FOUND_BOOTLOADER_SELF_SIGNED;
+                break;
+            }
+        }
+        return result;
+    }
+    ```
+- 思路
+    关于prop的检测思路很简单，直接操作运行时的属性文件，读取其中的属性值
+    - ro.boot.verifiedbootstate: 用来表示bl锁是否已经解锁，解锁后属性值为yellow
+    - ro.boot.vbmeta.device_state: 同样用来表示设备完成性，当解锁bl或是刷入非官方boot时，属性值都会变成unlocked
+    - ro.dalvik.vm.native.bridge: 正常情况下会是0，但是riru修改了该属性，替换成了libriruloader，这样就能通过判断这个属性来检测是否加载了riru
+    
+##### 3.2 detectMagiskPts
+- 检测方式
+    ```java
+    // Scan /dev/pts and check if there is an alive magisk pts
+    // Use `magisk su` to open a root session to test it
+    @SuppressLint({"PrivateApi", "DiscouragedPrivateApi"})
+    private static int detectMagiskPts() {
+        Method getFileContext;
+
+        // Os.getxattr is available since Oreo, fallback to getFileContext on pre O
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            try {
+                getFileContext = Class.forName("android.os.SELinux")
+                        .getDeclaredMethod("getFileContext", String.class);
+                getFileContext.setAccessible(true);
+            } catch (Throwable e) {
+                Log.e(TAG, "Failed to reflect getFileContext", e);
+                return 0;
+            }
+        } else {
+            getFileContext = null;
+        }
+
+        // Listing files under /dev/pts is not possible because of SELinux
+        // So we manually recreate the folder structure
+        // 轮询查找是否有可用的rts
+        var basePts = new File("/dev/pts");
+        for (int i = 0;i < 1024;i++) {
+            var pts = new File(basePts, Integer.toString(i));
+
+            // No more pts, break.
+            if (!pts.exists()) break;
+
+            // We found an active pts, check if it has magisk context.
+            try {
+                String ptsContext;
+                if (getFileContext != null) {
+                    ptsContext = (String) getFileContext.invoke(null, pts.getAbsolutePath());
+                } else {
+                    @SuppressLint({"NewApi", "LocalSuppress"})
+                    byte[] raw = Os.getxattr(pts.getAbsolutePath(), "security.selinux");
+                    // Os.getxattr returns the raw data which includes the C-style terminator ('\0')
+                    // We need to manually exclude it
+                    int terminatorIndex = 0;
+                    for (;terminatorIndex < raw.length && raw[terminatorIndex] != 0;terminatorIndex++);
+                    ptsContext = new String(raw, 0, terminatorIndex, StandardCharsets.UTF_8);
+                }
+                if ("u:object_r:magisk_file:s0".equals(ptsContext))
+                    return FOUND_MAGISK_PTS;
+            } catch (Throwable e) {
+                Log.e(TAG, "Failed to check file context of " + pts, e);
+            }
+        }
+        return 0;
+    }
+    ```
+- 思路
+    首先了解下/dev/pts，/dev/pts是一个特殊的文件系统，用于提供伪终端（pseudo terminal）设备。伪终端是一种虚拟的终端设备，它可以模拟物理终端设备的功能，让用户和程序可以像使用物理终端一样使用它来进行输入和输出。也就是说当我们使用adb去调试设备时，每当我们开启一个adb连接，/dev/pts目录下就会新增一个对应的文件，而也正可以通过这个方法来检测是否开启了magisk的pts，如下
+    ```
+    1|sailfish:/ # ls -alZ /dev/pts
+    total 0
+    drwxr-xr-x  2 root  root  u:object_r:devpts:s0             0 1970-01-01 08:00 .
+    drwxr-xr-x 18 root  root  u:object_r:device:s0          3980 2022-02-11 00:16 ..
+    crw-------  1 shell shell u:object_r:devpts:s0      136,   0 2022-02-12 02:11 0
+    crw-------  1 shell shell u:object_r:magisk_file:s0 136,   1 2022-02-12 02:11 1
+    crw-------  1 shell shell u:object_r:magisk_file:s0 136,   2 2022-02-12 02:12 2
+    crw-------  1 shell shell u:object_r:devpts:s0      136,   3 2022-02-12 02:12 3
+    crw-------  1 root  root  u:object_r:magisk_file:s0 136,   4 2022-02-12 02:11 4
+    crw-------  1 shell shell u:object_r:devpts:s0      136,   5 2022-02-12 02:06 5
+    ```
+    查看/dev/pts目录下的文件属性可以看出，magisk_file特征的文件就是magisk pts
+##### 3.3 detectTracerTask

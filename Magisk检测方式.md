@@ -1049,5 +1049,11 @@ public static int detect(String apk) {
         return 0;
     }
     ```
+    具体例子如下
+    ```shell
+    sailfish:/ $ ps -ef|grep magiskkiller
+    u0_a148      30043   763 72 17:09:19 ?    00:00:01 top.canyie.magiskkiller
+    u0_a148      30110     1 17 17:09:20 ?    00:00:00 app_process /system/bin --nice-name=zygote top.canyie.magiskkiller.SubprocessMain --write-fd 40
+    ```
 - 思路
     很巧妙的思路，因为MagiskHide会attach到zygote进程，监控zygote的动作，因此就可以主动构成一个伪zygote进程，主动让MagiskHide attach，这样就可以根据TracerPid来判断是否开启了MagiskHide

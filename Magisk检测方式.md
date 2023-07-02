@@ -910,3 +910,144 @@ public static int detect(String apk) {
     ```
     查看/dev/pts目录下的文件属性可以看出，magisk_file特征的文件就是magisk pts
 ##### 3.3 detectTracerTask
+最关键的一个检测手段，也是为了应对MagiskHide
+- 检测方式
+    ```java
+    //app/src/main/java/top/canyie/magiskkiller/MagiskKiller.java
+    public static Callable<Integer> detectTracer(String apk) {
+        // Magisk Hide will attach processes with name=zygote/zygote64 and ppid=1
+        // Orphan processes will have PPID=1
+        // The return value is the pipe to communicate with the child process
+        int rawReadFd = forkOrphan(apk);
+
+        if (rawReadFd < 0) throw new RuntimeException("fork failed");
+        var readFd = ParcelFileDescriptor.adoptFd(rawReadFd);
+        return () -> {
+            try (DataInputStream fis = new DataInputStream(new ParcelFileDescriptor.AutoCloseInputStream(readFd))) {
+                return Integer.parseInt(fis.readUTF());
+            }
+        };
+    }
+    ```
+    创建fd的过程
+    ```c
+    //app/src/main/cpp/main.cpp
+    jint SafetyChecker_forkOrphan(JNIEnv* env, jclass, jstring apk) {
+        // After forking we are no longer able to call many functions including JNI
+        auto orig_apk_path = env->GetStringUTFChars(apk, nullptr);
+        auto apk_path = strdup(orig_apk_path);
+        env->ReleaseStringUTFChars(apk, orig_apk_path);
+        // 获取apk_path
+
+        // Create pipe to communicate with the child process
+        // Do not use O_CLOEXEC as we want to write to pipe after exec
+        int fd[2];
+        if (pipe(fd) == -1) return -1;
+        // 创建匿名管道
+        int read_fd = fd[0];
+        int write_fd = fd[1];
+
+        char tmp[32];
+        snprintf(tmp, sizeof(tmp), "%d", write_fd);
+        auto fd_arg = strdup(tmp);
+        // fd_arg是write_fd
+
+        pid_t pid = fork();
+        if (pid < 0) return pid; // fork failed
+        // 调用fork产生子进程
+        if (pid == 0) { // child process
+            close(read_fd);
+            // 在子进程中再次调用fork
+            pid = fork();
+            if (pid > 0) {
+                exit(0);
+            } else if (pid < 0) {
+                // fork failed, exit to trigger EOFException when reader reads from pipe
+                LOGE("fork() failed with %d: %s", errno, strerror(errno));
+                close(write_fd);
+                abort();
+            }
+            // 杀死父进程，保证子进程是孤儿进程以便于让zygote接管，ppid=1
+            // pid == 0, make sure we're orphan process (parent died)
+            kill(getppid(), SIGKILL);
+
+            // After fork we cannot call many functions including JNI (otherwise we may deadlock)
+            // Call execl() to recreate runtime and run our checking code
+            // 创建新进程，名称为zygote，执行的类为SubprocessMain，传入pipe的fd
+            setenv("CLASSPATH", apk_path, 1);
+            execl("/system/bin/app_process",
+                "/system/bin/app_process",
+                "/system/bin",
+                // We already have PPID=1, set process name to zygote
+                // MagiskHide will think we're zygote and attach us
+                "--nice-name=zygote",
+                "top.canyie.magiskkiller.SubprocessMain",
+                "--write-fd",
+                fd_arg,
+                (char*) nullptr);
+
+            // execl() only returns if failed
+            LOGE("execl() failed with %d: %s", errno, strerror(errno));
+            abort();
+        }
+        // parent process
+        free(fd_arg);
+        free(apk_path);
+        close(write_fd);
+        return read_fd;
+    }
+    ```
+    到这步已经创建好了基于SubprocessMain类的新进程，这个进程ppid=1并且名为zygote，可以被MagiskHide attach
+    ```java
+    //app/src/main/java/top/canyie/magiskkiller/SubprocessMain.java
+    public class SubprocessMain {
+        public static void main(String[] args) {
+            // 解析出writeFd
+            // Parse fd
+            if (args.length != 2 || !"--write-fd".equals(args[0])) {
+                String error = "Bad args passed: " + Arrays.toString(args);
+                System.err.println(error);
+                Log.e(MagiskKiller.TAG, error);
+                System.exit(1);
+            }
+            ParcelFileDescriptor writeFd = null;
+            try {
+                writeFd = ParcelFileDescriptor.adoptFd(Integer.parseInt(args[1]));
+            } catch (Exception e) {
+                System.err.println("Unable to parse " + args[1]);
+                e.printStackTrace();
+                Log.e(MagiskKiller.TAG, "Unable to parse " + args[1], e);
+                System.exit(1);
+            }
+            try {
+                // 获取tracer，将tracer的pid写回pipe
+                // Do our work and send the tracer's pid back to app
+                int tracer = MagiskKiller.requestTrace();
+                try (DataOutputStream fos = new DataOutputStream(new ParcelFileDescriptor.AutoCloseOutputStream(writeFd))) {
+                    fos.writeUTF(Integer.toString(tracer));
+                }
+            } catch (Throwable e) {
+                e.printStackTrace();
+                Log.e(MagiskKiller.TAG, "", e);
+                System.exit(1);
+            }
+        }
+    }
+
+    //app/src/main/java/top/canyie/magiskkiller/MagiskKiller.java
+    public static int getTracer() {
+        try (BufferedReader br = new BufferedReader(new FileReader("/proc/self/status"))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (line.startsWith("TracerPid:")) {
+                    return Integer.parseInt(line.substring("TracerPid:".length()).trim());
+                }
+            }
+        } catch (IOException e) {
+            throw new RuntimeException("read tracer", e);
+        }
+        return 0;
+    }
+    ```
+- 思路
+    很巧妙的思路，因为MagiskHide会attach到zygote进程，监控zygote的动作，因此就可以主动构成一个伪zygote进程，主动让MagiskHide attach，这样就可以根据TracerPid来判断是否开启了MagiskHide

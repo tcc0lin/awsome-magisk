@@ -77,10 +77,12 @@ static void forkAndSpecializePre(
         jintArray *fdsToClose, jintArray *fdsToIgnore, jboolean *is_child_zygote,
         jstring *instructionSet, jstring *appDataDir, jboolean *isTopApp, jobjectArray *pkgDataInfoList,
         jobjectArray *whitelistedDataInfoList, jboolean *bindMountAppDataDirs, jboolean *bindMountAppStorageDirs) {
+    //应用启动前调用
     doUnshare(env, uid, mountExternal, niceName, *is_child_zygote);
 }
 
 static void doUnshare(JNIEnv *env, jint *uid, jint *mountExternal, jstring *niceName, bool is_child_zygote) {
+    //uid判断
     if (shouldSkipUid(*uid)) return;
     if (*mountExternal == 0) {
         *mountExternal = 1;
@@ -96,6 +98,10 @@ static int shouldSkipUid(int uid) {
     if (appid >= AID_APP_START && appid <= AID_APP_END) return false;
     if (appid >= AID_ISOLATED_START && appid <= AID_ISOLATED_END) return false;
     return true;
+}
+
+static bool is_app(int uid) {
+    return uid%100000 >= 10000 && uid%100000 <= 19999;
 }
 ```
 #### 2 forkAndSpecializePost

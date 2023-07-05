@@ -262,6 +262,7 @@ static void MountEmulatedStorage(uid_t uid, jint mount_mode,
   }
 }
 ```
+理解好mountExternal的使用之后，再结合unshare的机制来看，就是当有进程想和zygote共享namespace时，强行为该进程创建新的namespace，这样就能够对这个进程进行unmount了
 #### 2 forkAndSpecializePost
 ```c
 static void forkAndSpecializePost(JNIEnv *env, jclass clazz, jint res) {

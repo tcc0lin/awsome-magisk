@@ -12,3 +12,4 @@
     - [riru-unshare源码分析](https://github.com/tcc0lin/awsome-magisk/blob/main/riru-unshare%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90.md)
     - [riru-MomoHider源码分析](https://github.com/tcc0lin/awsome-magisk/blob/main/riru-MomoHider%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90.md)
     - 魔改Magisk
+    - Zygisk原理分析
